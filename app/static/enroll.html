@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Quick Enroll — Attendance Tracker</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    .layout { display: grid; grid-template-columns: 1.2fr 1fr; gap: 20px; }
+    .video-wrap { position: relative; }
+    video { width: 100%; border-radius: 8px; background: #000; aspect-ratio: 4 / 3; }
+    canvas { display: none; }
+    .prompt-overlay {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.55); border-radius: 8px; color: white;
+      font-size: 22px; font-weight: 600; text-align: center; padding: 20px;
+      pointer-events: none;
+    }
+    .prompt-overlay.hidden { display: none; }
+    .countdown {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      font-size: 64px; font-weight: 800; color: white;
+      text-shadow: 0 4px 24px rgba(0,0,0,0.7);
+      pointer-events: none;
+    }
+    .frame-strip { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .frame-slot {
+      width: 88px; height: 66px; border: 2px dashed var(--border); border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 11px; text-align: center; overflow: hidden;
+    }
+    .frame-slot.done { border-style: solid; border-color: var(--ok); }
+    .frame-slot img { width: 100%; height: 100%; object-fit: cover; }
+    .frame-slot.failed { border-color: var(--danger); }
+    .step-list { list-style: none; margin: 0; padding: 0; }
+    .step-list li { padding: 6px 0; color: var(--muted); }
+    .step-list li.active { color: var(--text); font-weight: 600; }
+    .step-list li.done { color: var(--ok); }
+    .result-card { padding: 16px; border-radius: 8px; margin-top: 16px; }
+    .result-card.ok { background: rgba(31,181,116,0.1); border: 1px solid var(--ok); }
+    .result-card.err { background: rgba(229,72,77,0.1); border: 1px solid var(--danger); }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <h1>Attendance Tracker</h1>
+    <nav class="app-nav">
+      <a href="/students-page">Roster</a>
+      <a href="/enroll-page" class="active">Enroll</a>
+      <a href="/camera-test">Camera Test</a>
+      <a href="#" data-disabled>Check-in</a>
+      <a href="#" data-disabled>Dashboard</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="card">
+      <h2>Quick Enroll</h2>
+      <p style="color: var(--muted); margin: 0 0 16px 0;">
+        Captures 5 frames at different angles, computes a face embedding,
+        and generates a printable ID card.
+      </p>
+      <div class="form-row">
+        <label style="color: var(--muted); font-size: 13px;">Student</label>
+        <select id="student-select"><option value="">Loading…</option></select>
+        <span style="color: var(--muted); font-size: 13px;">— or add new —</span>
+        <input id="new-first" placeholder="First name" />
+        <input id="new-last" placeholder="Last name" />
+        <button id="add-and-select" class="secondary">Add</button>
+      </div>
+      <div class="form-row">
+        <button id="start-camera">Start camera</button>
+        <button id="begin-enroll" disabled>Begin enrollment</button>
+        <button id="stop-camera" class="secondary" disabled>Stop camera</button>
+      </div>
+
+      <div class="layout">
+        <div class="video-wrap">
+          <video id="video" autoplay playsinline muted></video>
+          <div class="prompt-overlay hidden" id="prompt"></div>
+          <div class="countdown" id="countdown"></div>
+          <div class="frame-strip" id="frame-strip"></div>
+        </div>
+        <div>
+          <h3 style="margin-top: 0;">Steps</h3>
+          <ol class="step-list" id="steps"></ol>
+          <div id="result"></div>
+        </div>
+      </div>
+      <canvas id="canvas"></canvas>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    const ANGLES = [
+      { label: "straight", prompt: "Look straight at the camera" },
+      { label: "left", prompt: "Turn slightly LEFT" },
+      { label: "right", prompt: "Turn slightly RIGHT" },
+      { label: "up", prompt: "Tilt your head UP" },
+      { label: "down", prompt: "Tilt your head DOWN" },
+    ];
+
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const promptEl = document.getElementById("prompt");
+    const countdownEl = document.getElementById("countdown");
+    const stripEl = document.getElementById("frame-strip");
+    const stepsEl = document.getElementById("steps");
+    const resultEl = document.getElementById("result");
+    const studentSelect = document.getElementById("student-select");
+    const startBtn = document.getElementById("start-camera");
+    const stopBtn = document.getElementById("stop-camera");
+    const enrollBtn = document.getElementById("begin-enroll");
+    const addBtn = document.getElementById("add-and-select");
+
+    let stream = null;
+    let capturedFrames = [];
+
+    function renderSteps(activeIdx, doneFlags) {
+      stepsEl.innerHTML = ANGLES.map((a, i) => {
+        const cls = doneFlags[i] ? "done" : i === activeIdx ? "active" : "";
+        return `<li class="${cls}">${i + 1}. ${a.prompt}</li>`;
+      }).join("");
+    }
+
+    function renderStrip(slots) {
+      stripEl.innerHTML = ANGLES.map((a, i) => {
+        const s = slots[i];
+        if (!s) return `<div class="frame-slot">${a.label}</div>`;
+        if (s.failed) return `<div class="frame-slot failed">${a.label}<br/>×</div>`;
+        return `<div class="frame-slot done"><img src="${s.url}" alt="${a.label}" /></div>`;
+      }).join("");
+    }
+
+    async function loadStudents() {
+      const students = await api("/api/students");
+      studentSelect.innerHTML =
+        '<option value="">— pick a student —</option>' +
+        students.map(s => `<option value="${s.id}">${escapeHtml(s.student_code)} · ${escapeHtml(s.first_name)} ${escapeHtml(s.last_name)}${s.has_embedding ? " (re-enroll)" : ""}</option>`).join("");
+    }
+
+    addBtn.addEventListener("click", async () => {
+      const first = document.getElementById("new-first").value.trim();
+      const last = document.getElementById("new-last").value.trim();
+      if (!first || !last) return toast("Enter first and last name", "error");
+      try {
+        const s = await api("/api/students", { method: "POST", body: { first_name: first, last_name: last } });
+        await loadStudents();
+        studentSelect.value = s.id;
+        document.getElementById("new-first").value = "";
+        document.getElementById("new-last").value = "";
+        toast(`Added ${s.first_name} ${s.last_name}`);
+      } catch (err) { toast(err.message, "error"); }
+    });
+
+    startBtn.addEventListener("click", async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: "user" }, audio: false,
+        });
+        video.srcObject = stream;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        enrollBtn.disabled = false;
+        toast("Camera started — pick a student and click Begin");
+      } catch (err) { toast(`Camera: ${err.message}`, "error"); }
+    });
+
+    stopBtn.addEventListener("click", () => {
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      stream = null;
+      video.srcObject = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      enrollBtn.disabled = true;
+      promptEl.classList.add("hidden");
+      countdownEl.textContent = "";
+    });
+
+    function grabBlob() {
+      return new Promise((resolve) => {
+        if (!stream || !video.videoWidth) return resolve(null);
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext("2d").drawImage(video, 0, 0);
+        canvas.toBlob(resolve, "image/jpeg", 0.88);
+      });
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    enrollBtn.addEventListener("click", async () => {
+      const studentId = parseInt(studentSelect.value, 10);
+      if (!studentId) return toast("Pick a student first", "error");
+
+      enrollBtn.disabled = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = true;
+      resultEl.innerHTML = "";
+      capturedFrames = [];
+
+      const slots = ANGLES.map(() => null);
+      const done = ANGLES.map(() => false);
+      renderStrip(slots);
+      renderSteps(0, done);
+
+      for (let i = 0; i < ANGLES.length; i++) {
+        promptEl.textContent = ANGLES[i].prompt;
+        promptEl.classList.remove("hidden");
+        renderSteps(i, done);
+        for (let c = 3; c >= 1; c--) {
+          countdownEl.textContent = String(c);
+          await sleep(700);
+        }
+        countdownEl.textContent = "snap";
+        const blob = await grabBlob();
+        await sleep(220);
+        countdownEl.textContent = "";
+        promptEl.classList.add("hidden");
+
+        if (blob) {
+          capturedFrames.push({ angle: ANGLES[i].label, blob });
+          slots[i] = { url: URL.createObjectURL(blob), failed: false };
+          done[i] = true;
+          renderStrip(slots);
+        } else {
+          slots[i] = { failed: true };
+          renderStrip(slots);
+        }
+        renderSteps(i + 1, done);
+        await sleep(350);
+      }
+
+      promptEl.textContent = "Uploading and computing embedding…";
+      promptEl.classList.remove("hidden");
+
+      const fd = new FormData();
+      fd.append("student_id", studentId);
+      fd.append("angle_labels", capturedFrames.map(f => f.angle).join(","));
+      capturedFrames.forEach((f, i) => fd.append("frames", f.blob, `${f.angle}.jpg`));
+
+      try {
+        const result = await api("/api/enroll", { method: "POST", body: fd });
+        promptEl.classList.add("hidden");
+
+        if (result.ok) {
+          resultEl.innerHTML = `
+            <div class="result-card ok">
+              <strong>✓ ${escapeHtml(result.message)}</strong>
+              <div style="margin-top: 8px;">
+                <a class="btn" href="${result.card_pdf_url}" target="_blank">Print ID Card (PDF)</a>
+                <a class="btn secondary" href="${result.card_html_url}" target="_blank">HTML preview</a>
+              </div>
+              <p style="margin: 8px 0 0 0; color: var(--muted); font-size: 12px;">
+                Frames used: ${result.frames_used} of ${result.frames_used + result.frames_failed}.
+                Saved to <code>enrollment_data/</code>.
+              </p>
+            </div>`;
+          loadStudents();
+          toast(`Enrolled — frames used: ${result.frames_used}`);
+        } else {
+          const failures = (result.failures || []).map(escapeHtml).join("<br />");
+          resultEl.innerHTML = `
+            <div class="result-card err">
+              <strong>${escapeHtml(result.message)}</strong>
+              <p style="margin: 6px 0 0 0; font-size: 12px;">${failures}</p>
+            </div>`;
+          toast("Enrollment failed", "error");
+        }
+      } catch (err) {
+        promptEl.classList.add("hidden");
+        resultEl.innerHTML = `<div class="result-card err"><strong>Error:</strong> ${escapeHtml(err.message)}</div>`;
+      } finally {
+        enrollBtn.disabled = false;
+        startBtn.disabled = !!stream;
+        stopBtn.disabled = !stream;
+      }
+    });
+
+    loadStudents();
+  </script>
+</body>
+</html>
