@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import PROJECT_ROOT
 from app.database import Base, engine
-from app.routers import camera_test, cards, checkin, enroll, students
+from app.routers import camera_test, cards, checkin, dashboard, enroll, students
 
 
 @asynccontextmanager
@@ -28,6 +28,8 @@ app.include_router(camera_test.router)
 app.include_router(enroll.router)
 app.include_router(cards.router)
 app.include_router(checkin.router)
+app.include_router(dashboard.router)
+app.include_router(dashboard.spoof_router)
 
 
 @app.get("/")

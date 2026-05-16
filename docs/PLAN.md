@@ -160,15 +160,76 @@ attendance_tracker/
 - [x] **Step 2 — Models + seed**: SQLAlchemy schema, `seed.py` creates 5 fake students + today's session
 - [x] **Step 3 — Roster page**: `/students-page` CRUD UI, full API at `/api/students`
 - [x] **Step 4 — Webcam pipeline scaffold**: `/camera-test` + `/api/camera-test/echo` stub
-- [ ] **Step 5 — Face enrollment v1**: `services/face.py` InsightFace wrapper; capture 1 frame, embed, store in `Student.face_embedding`
-- [ ] **Step 6 — Quick Enroll v2**: 5-angle guided UI (straight/left/right/up/down); save frames to `enrollment_data/{code}_{name}/`; L2-normalized average embedding
-- [ ] **Step 7 — Signed QR ID cards**: HMAC payload in `services/qr.py`; `services/qr.py::decode_from_frame()`; `routers/cards.py` renders PDF via `reportlab` (4 cards per page) to `id_cards/`
-- [ ] **Step 8 — Two-stage check-in**: `routers/checkin.py` with `/gate` (cheap detect) and `/verify` (expensive); state-machine overlays in `static/checkin.html`; 3-second confirmation flag; 3-second cooldown
-- [ ] **Step 9 — Liveness**: DeepFace `anti_spoofing=True` in `services/liveness.py`; integrate into `/verify`; save failed frames to `spoof_log/` + `SpoofAttempt` row
-- [ ] **Step 10 — Dashboard**: `routers/dashboard.py` stats endpoints; `static/dashboard.html` with Chart.js (weekly/monthly bars + per-student filter); spoof log viewer
-- [ ] **Step 11 — APScheduler + weekly Gmail report**: `services/reporting.py` renders `templates/weekly_email.html`; `services/email.py` sends via Gmail app password; `app/scheduler.py` registers Fri 5pm cron
-- [ ] **Step 12 — Threshold alerts + privacy controls**: daily 6pm threshold check → `AlertLog`; "Clear spoof log" button; threshold config UI; reconfirm delete-student cascades work
-- [ ] **Step 13 — Polish + demo rehearsal**: README polish; slide-deck outline in `docs/demo.md`; rehearsal checklist matching the demo plan in this file
+- [x] **Step 5 — Face enrollment v1**: `services/face.py` InsightFace wrapper (lazy load, embed, average, cosine, serialize)
+- [x] **Step 6 — Quick Enroll v2**: 5-angle guided UI at `/enroll-page`; saves frames + `embedding.npy` + `metadata.json` to `enrollment_data/{code}_{name}/`; L2-normalized average embedding
+- [x] **Step 7 — Signed QR ID cards**: HMAC-SHA256 in `services/qr.py`; `cv2.QRCodeDetector` decode-from-frame; `services/cards.py` renders 4-per-page PDF via `reportlab` + HTML preview to `id_cards/`
+- [x] **Step 8 — Check-in pipeline**: single `POST /api/checkin/process` endpoint with cheap-then-expensive early returns (no_qr → invalid_qr → liveness → no_face/multi_face/spoof → embed → wrong_face → no_session/duplicate → ok); `static/checkin.html` polls every 800ms with state-machine overlay + 3-second cooldown lock + live feed
+- [x] **Step 9 — Liveness**: DeepFace `anti_spoofing=True` in `services/liveness.py` (MiniFASNet, threshold from `LIVENESS_THRESHOLD`); spoof attempts save frame to `spoof_log/` + write `SpoofAttempt` row via `services/attendance.py::record_spoof_attempt`
+- [~] **Step 10 — Dashboard (HALF-DONE — pick up here)**: Stats API endpoints written and wired in `routers/dashboard.py`, but the UI page `static/dashboard.html` is **not yet built**. See "Next-up handoff" below.
+- [ ] **Step 11 — APScheduler + weekly Gmail report**: `services/reporting.py` renders `templates/weekly_email.html`; `services/email.py` sends via Gmail app password; `app/scheduler.py` registers Fri 5pm cron, started from FastAPI `lifespan` in `main.py`; manual trigger button `POST /admin/run-report`
+- [ ] **Step 12 — Threshold alerts + privacy controls**: daily 6pm cron in scheduler — scan `per-student` stats, write `AlertLog` rows for any student below `MIN_ATTENDANCE_PCT`; "Clear spoof log" UI calls existing `POST /api/spoof-log/clear`; surface `MIN_ATTENDANCE_PCT` config in the dashboard
+- [ ] **Step 13 — Polish + demo rehearsal**: README polish (mark Steps 5-13 as live in "What works today"); slide-deck outline in `docs/demo.md` (the demo plan above is the source); rehearsal checklist
+
+## Next-up handoff (Step 10 — Dashboard UI)
+
+### What's already in place
+- `app/routers/dashboard.py` exposes these endpoints (all return JSON):
+  - `GET /api/stats/overview?days=30` — header KPIs: total students, enrolled count + %, sessions in window, today's attendance count, class-wide attendance %, spoof count last 24h, min threshold
+  - `GET /api/stats/per-student?days=30&flagged_only=false` — table data with `attendance_pct` and `flagged: bool`
+  - `GET /api/stats/by-day?days=7` — list of `{date, attended, possible, pct}` for a bar chart
+  - `GET /api/stats/recent-events?limit=20` — recent check-ins with student name + timestamp + confidence
+  - `GET /api/spoof-log?limit=50` — list of spoof attempts; each has an `image_url`
+  - `GET /api/spoof-log/{id}/image` — serves the saved JPEG frame
+  - `POST /api/spoof-log/clear` — purges all spoof rows + their JPEGs
+- Both `dashboard.router` and `dashboard.spoof_router` are already `include_router`'d in `app/main.py`.
+- The other pages have a disabled "Dashboard" nav link (`data-disabled`); unset that when the page is live.
+
+### What's left for Step 10
+1. **Create `app/static/dashboard.html`** with sections in this order:
+   - **Header KPIs** (4-tile grid) — pull from `/api/stats/overview`: total students, enrolled %, attended today, spoof 24h
+   - **By-day bar chart** — Chart.js bar pulling `/api/stats/by-day?days=7`. Use the Chart.js CDN URL (no build tool needed).
+   - **Per-student table** — pull `/api/stats/per-student?days=30`. Columns: code, name, attended/total, %, flag. Style flagged rows red. Add a text input that filters client-side by name and a "Flagged only" checkbox that re-fetches with `?flagged_only=true`.
+   - **Recent check-ins feed** — pull `/api/stats/recent-events?limit=20`
+   - **Spoof log viewer** — pull `/api/spoof-log`. Render thumbnails using `image_url`. Include a "Clear log" button that POSTs to `/api/spoof-log/clear`.
+2. **Add the page route** in `app/main.py`:
+   ```python
+   @app.get("/dashboard-page", include_in_schema=False)
+   def dashboard_page():
+       return FileResponse(STATIC_DIR / "dashboard.html")
+   ```
+3. **Activate the nav link** — replace `<a href="#" data-disabled>Dashboard</a>` with `<a href="/dashboard-page">Dashboard</a>` in: `students.html`, `enroll.html`, `checkin.html`, `camera_test.html`.
+
+### What hasn't been end-to-end tested on this machine
+- **No webcam available** during this session, so the camera-driven paths (enrollment, check-in, liveness) were not actually run against real faces. Smoke-tested:
+  - All endpoints import + register correctly
+  - `/healthz`, `/api/students`, `/api/checkin/process` with a blank frame returns `no_qr` correctly
+  - QR sign/verify round-trip
+  - PDF + HTML card generation
+- **InsightFace model has not been downloaded yet** — the buffalo_l weights (~280MB) lazy-load on first call to `face.embed_single_face()`. Expect a long pause on the first real enrollment.
+- **DeepFace antispoof model** likewise loads on first call to `liveness.is_live()`.
+- Worth a smoke test before the demo: enroll one student, check-in, hold up a phone photo of them, confirm `spoof` state lights up.
+
+## Steps 11-13 sketch
+
+### Step 11 — Scheduler + weekly email
+- `app/services/email.py` — stdlib `smtplib` + `email.message.EmailMessage`; reads `SMTP_*` from settings; one function `send(subject, html_body, to_addr)`
+- `app/services/reporting.py` — `weekly_report()` queries last 7 days of attendance, renders Jinja2 `app/templates/weekly_email.html`, calls `email.send(...)`. Flag students below `MIN_ATTENDANCE_PCT` in red.
+- `app/scheduler.py` — APScheduler `BackgroundScheduler`; register two cron jobs:
+  - `weekly_report` — Fridays 17:00 local
+  - `daily_threshold_check` — 18:00 every day (Step 12)
+- `app/main.py` lifespan — start scheduler on startup, shutdown on exit
+- Add a hidden `POST /admin/run-report` endpoint for the demo so the email arrives on cue
+
+### Step 12 — Threshold alerts + privacy controls
+- Threshold cron writes one `AlertLog` row per below-threshold student per day (dedup on `(student_id, date)`)
+- Dashboard already wires `POST /api/spoof-log/clear`; just expose the button
+- Per-student "Re-enroll" button in the roster page (calls `POST /api/enroll` again)
+- Settings UI to edit `min_attendance_pct` (read/write the `AttendanceThreshold` k/v row)
+
+### Step 13 — Polish + demo docs
+- README "What works today" section reflects Steps 5-13
+- `docs/demo.md` — the demo plan from this PLAN, plus a rehearsal checklist
+- Verification table from PLAN's "Verification" section as a literal pre-demo checklist
 
 ---
 
