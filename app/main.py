@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import PROJECT_ROOT
 from app.database import Base, engine
-from app.routers import camera_test, cards, enroll, students
+from app.routers import camera_test, cards, checkin, enroll, students
 
 
 @asynccontextmanager
@@ -27,6 +27,7 @@ app.include_router(students.router)
 app.include_router(camera_test.router)
 app.include_router(enroll.router)
 app.include_router(cards.router)
+app.include_router(checkin.router)
 
 
 @app.get("/")
@@ -47,6 +48,11 @@ def camera_test_page():
 @app.get("/enroll-page", include_in_schema=False)
 def enroll_page():
     return FileResponse(STATIC_DIR / "enroll.html")
+
+
+@app.get("/checkin-page", include_in_schema=False)
+def checkin_page():
+    return FileResponse(STATIC_DIR / "checkin.html")
 
 
 @app.get("/healthz", include_in_schema=False)

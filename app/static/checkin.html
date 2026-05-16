@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Check-in — Attendance Tracker</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    main.kiosk { max-width: 800px; }
+    .video-wrap { position: relative; }
+    video { width: 100%; border-radius: 12px; background: #000; aspect-ratio: 4 / 3; }
+    canvas { display: none; }
+
+    .state-banner {
+      position: absolute; left: 0; right: 0; bottom: 0;
+      padding: 20px 24px;
+      font-size: 22px; font-weight: 700;
+      color: white; text-shadow: 0 2px 8px rgba(0,0,0,0.4);
+      background: linear-gradient(transparent, rgba(0,0,0,0.6));
+      border-radius: 0 0 12px 12px;
+      display: flex; align-items: center; gap: 12px;
+    }
+    .state-banner.idle      { background: linear-gradient(transparent, rgba(35,42,53,0.85)); }
+    .state-banner.busy      { background: linear-gradient(transparent, rgba(35,42,53,0.85)); }
+    .state-banner.no_qr     { background: linear-gradient(transparent, rgba(244,183,64,0.85)); }
+    .state-banner.no_face   { background: linear-gradient(transparent, rgba(244,183,64,0.85)); }
+    .state-banner.multi_face{ background: linear-gradient(transparent, rgba(244,183,64,0.85)); }
+    .state-banner.invalid_qr,
+    .state-banner.wrong_face,
+    .state-banner.spoof,
+    .state-banner.no_session  { background: linear-gradient(transparent, rgba(229,72,77,0.92)); }
+    .state-banner.duplicate { background: linear-gradient(transparent, rgba(79,140,255,0.9)); }
+    .state-banner.ok        { background: linear-gradient(transparent, rgba(31,181,116,0.92)); }
+
+    .icon {
+      width: 36px; height: 36px; border-radius: 18px;
+      background: rgba(255,255,255,0.2);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 22px;
+    }
+
+    .meta { color: var(--muted); font-size: 13px; margin-top: 12px; display: flex; gap: 18px; flex-wrap: wrap; }
+    .meta b { color: var(--text); font-weight: 600; }
+
+    .feed {
+      margin-top: 20px;
+      max-height: 220px; overflow: auto;
+      font-size: 13px;
+    }
+    .feed-row {
+      display: grid; grid-template-columns: 100px 1fr auto;
+      gap: 10px;
+      padding: 8px 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    .feed-row .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .feed-row.ok .who { color: var(--ok); font-weight: 600; }
+    .feed-row.spoof .who, .feed-row.wrong_face .who, .feed-row.invalid_qr .who { color: var(--danger); font-weight: 600; }
+    .feed-row.duplicate .who { color: var(--accent); }
+
+    .lock-overlay {
+      position: absolute; inset: 0; border-radius: 12px;
+      background: rgba(0,0,0,0.55);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-size: 14px;
+    }
+    .lock-overlay.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <h1>Attendance Tracker</h1>
+    <nav class="app-nav">
+      <a href="/students-page">Roster</a>
+      <a href="/enroll-page">Enroll</a>
+      <a href="/camera-test">Camera Test</a>
+      <a href="/checkin-page" class="active">Check-in</a>
+      <a href="#" data-disabled>Dashboard</a>
+    </nav>
+  </header>
+
+  <main class="kiosk">
+    <div class="card">
+      <h2>Door check-in</h2>
+      <p style="color: var(--muted); margin: 0 0 16px 0;">
+        Camera scans every 800ms. Students hold their ID card up next to their face.
+      </p>
+      <div class="form-row">
+        <button id="start">Start camera</button>
+        <button id="stop" class="secondary" disabled>Stop</button>
+        <span style="margin-left: auto; color: var(--muted); font-size: 13px;">
+          Polling: <b id="rate">— /s</b> · Last status:
+          <code id="last-state">—</code>
+        </span>
+      </div>
+      <div class="video-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <div class="state-banner idle" id="banner">
+          <div class="icon">·</div>
+          <div id="banner-text">Click "Start camera" to begin.</div>
+        </div>
+        <div class="lock-overlay hidden" id="lock"></div>
+      </div>
+      <div class="meta" id="meta"></div>
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <div class="card">
+      <h2>Today's check-ins</h2>
+      <div class="feed" id="feed"><div style="color: var(--muted); padding: 16px;">Waiting for first check-in…</div></div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const banner = document.getElementById("banner");
+    const bannerText = document.getElementById("banner-text");
+    const meta = document.getElementById("meta");
+    const feed = document.getElementById("feed");
+    const startBtn = document.getElementById("start");
+    const stopBtn = document.getElementById("stop");
+    const lock = document.getElementById("lock");
+    const lastStateEl = document.getElementById("last-state");
+    const rateEl = document.getElementById("rate");
+
+    const POLL_MS = 800;
+    const LOCK_MS = 3000;   // after ok / rejected, wait 3s before next call
+
+    let stream = null;
+    let pollTimer = null;
+    let lockedUntil = 0;
+    let inFlight = false;
+    let rateCounter = 0;
+    let rateClock = setInterval(() => {
+      rateEl.textContent = rateCounter.toFixed(1) + " /s";
+      rateCounter = 0;
+    }, 1000);
+
+    const ICONS = {
+      idle: "·", no_qr: "💳", no_face: "👤", multi_face: "👥",
+      invalid_qr: "✕", wrong_face: "✕", spoof: "!", no_session: "?",
+      duplicate: "↺", ok: "✓", busy: "…",
+    };
+
+    function setBanner(state, message) {
+      banner.className = "state-banner " + state;
+      bannerText.textContent = message || "";
+      banner.querySelector(".icon").textContent = ICONS[state] || "·";
+      lastStateEl.textContent = state;
+    }
+
+    function setMeta(payload) {
+      const bits = [];
+      if (payload.student_name) bits.push(`<span><b>${escapeHtml(payload.student_name)}</b></span>`);
+      if (payload.student_code) bits.push(`<span>ID <b>${escapeHtml(payload.student_code)}</b></span>`);
+      if (typeof payload.confidence === "number") bits.push(`<span>Face match: <b>${(payload.confidence * 100).toFixed(1)}%</b></span>`);
+      if (typeof payload.liveness_score === "number") bits.push(`<span>Liveness: <b>${(payload.liveness_score * 100).toFixed(0)}%</b></span>`);
+      if (payload.session_name) bits.push(`<span>Session: <b>${escapeHtml(payload.session_name)}</b></span>`);
+      meta.innerHTML = bits.join("");
+    }
+
+    function appendFeed(payload) {
+      const t = new Date(payload.checked_in_at || Date.now()).toLocaleTimeString();
+      const row = document.createElement("div");
+      row.className = "feed-row " + payload.state;
+      const who = payload.student_name || (payload.state === "spoof" ? "(spoof attempt)" : "(rejected)");
+      row.innerHTML = `
+        <div class="t">${escapeHtml(t)}</div>
+        <div class="who">${escapeHtml(who)}</div>
+        <div class="t">${escapeHtml(payload.state)}</div>`;
+      if (feed.querySelector(".feed-row") === null) feed.innerHTML = "";
+      feed.prepend(row);
+      while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+    }
+
+    async function start() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: "user" }, audio: false,
+        });
+        video.srcObject = stream;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        setBanner("idle", "Looking for a student…");
+        pollTimer = setInterval(loop, POLL_MS);
+      } catch (err) {
+        setBanner("invalid_qr", `Camera error: ${err.message}`);
+      }
+    }
+
+    function stop() {
+      clearInterval(pollTimer); pollTimer = null;
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      stream = null;
+      video.srcObject = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      setBanner("idle", "Camera stopped.");
+      lock.classList.add("hidden");
+    }
+
+    function grabBlob() {
+      return new Promise(r => {
+        if (!stream || !video.videoWidth) return r(null);
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext("2d").drawImage(video, 0, 0);
+        canvas.toBlob(r, "image/jpeg", 0.85);
+      });
+    }
+
+    const TERMINAL = new Set(["ok", "spoof", "wrong_face", "invalid_qr", "duplicate"]);
+
+    async function loop() {
+      if (inFlight || Date.now() < lockedUntil) return;
+      const blob = await grabBlob();
+      if (!blob) return;
+      inFlight = true;
+      const fd = new FormData();
+      fd.append("frame", blob, "frame.jpg");
+      try {
+        const result = await api("/api/checkin/process", { method: "POST", body: fd });
+        rateCounter++;
+        setBanner(result.state, result.message);
+        setMeta(result);
+        if (TERMINAL.has(result.state)) {
+          appendFeed(result);
+          lockedUntil = Date.now() + LOCK_MS;
+          lock.classList.remove("hidden");
+          lock.textContent = "Next student in 3 seconds…";
+          setTimeout(() => {
+            lock.classList.add("hidden");
+            setBanner("idle", "Looking for the next student…");
+            meta.innerHTML = "";
+          }, LOCK_MS);
+        }
+      } catch (err) {
+        setBanner("invalid_qr", `Server error: ${err.message}`);
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    startBtn.addEventListener("click", start);
+    stopBtn.addEventListener("click", stop);
+  </script>
+</body>
+</html>
