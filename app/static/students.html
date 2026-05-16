@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Roster — Attendance Tracker</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <h1>Attendance Tracker</h1>
+    <nav class="app-nav">
+      <a href="/students-page" class="active">Roster</a>
+      <a href="/camera-test">Camera Test</a>
+      <a href="#" data-disabled>Check-in</a>
+      <a href="#" data-disabled>Dashboard</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="card">
+      <h2>Add student</h2>
+      <form id="add-student">
+        <div class="form-row">
+          <input name="first_name" placeholder="First name" required />
+          <input name="last_name" placeholder="Last name" required />
+          <input name="email" placeholder="Email (optional)" type="email" />
+          <button type="submit">Add</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Roster <span id="count" class="badge muted"></span></h2>
+      <table id="roster">
+        <thead>
+          <tr>
+            <th>Code</th>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Enrolled</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="empty" hidden>No students yet. Add one above, or run <code>python seed.py</code>.</div>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    async function refresh() {
+      const students = await api("/api/students");
+      const tbody = document.querySelector("#roster tbody");
+      const empty = document.getElementById("empty");
+      const count = document.getElementById("count");
+
+      tbody.innerHTML = "";
+      count.textContent = `${students.length} ${students.length === 1 ? "student" : "students"}`;
+      empty.hidden = students.length > 0;
+
+      for (const s of students) {
+        const tr = document.createElement("tr");
+        const enrolled = s.has_embedding
+          ? `<span class="badge ok">Face enrolled</span>`
+          : `<span class="badge warn">No face</span>`;
+        const active = s.active
+          ? `<span class="badge ok">Active</span>`
+          : `<span class="badge muted">Inactive</span>`;
+        tr.innerHTML = `
+          <td>${escapeHtml(s.student_code)}</td>
+          <td>${escapeHtml(s.first_name)} ${escapeHtml(s.last_name)}</td>
+          <td>${escapeHtml(s.email || "—")}</td>
+          <td>${enrolled}</td>
+          <td>${active}</td>
+          <td><button class="secondary" data-delete="${s.id}">Delete</button></td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    document.getElementById("add-student").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const data = Object.fromEntries(new FormData(form));
+      if (!data.email) delete data.email;
+      try {
+        await api("/api/students", { method: "POST", body: data });
+        form.reset();
+        toast("Student added");
+        refresh();
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    });
+
+    document.addEventListener("click", async (e) => {
+      const btn = e.target.closest("[data-delete]");
+      if (!btn) return;
+      const id = btn.getAttribute("data-delete");
+      if (!confirm("Delete this student and their face embedding? This cannot be undone.")) return;
+      try {
+        await api(`/api/students/${id}`, { method: "DELETE" });
+        toast("Student deleted");
+        refresh();
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    });
+
+    refresh();
+  </script>
+</body>
+</html>

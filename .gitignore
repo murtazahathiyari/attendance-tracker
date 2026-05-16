@@ -1,0 +1,35 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Database
+attendance.db
+attendance.db-journal
+
+# Student biometric data — never commit
+enrollment_data/*/
+id_cards/*.pdf
+id_cards/*.html
+spoof_log/*.jpg
+spoof_log/*.png
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local logs
+server.log
+*.log
+
+# Claude Code per-project settings (machine-local)
+.claude/

@@ -1,0 +1,38 @@
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+jinja2==3.1.4
+
+# Database
+sqlalchemy==2.0.35
+pydantic==2.9.2
+pydantic-settings==2.5.2
+# EmailStr in pydantic requires this — only used to validate optional Student.email.
+email-validator==2.2.0
+
+# Face recognition
+insightface==0.7.3
+onnxruntime==1.19.2
+
+# Liveness / anti-spoofing
+# (DeepFace pulls tensorflow; on Apple Silicon, install
+#  tensorflow-macos + tensorflow-metal manually instead.)
+deepface==0.0.93
+tf-keras==2.17.0
+
+# Computer vision
+opencv-python==4.10.0.84
+pillow==10.4.0
+
+# IMPORTANT: numpy < 2 — onnxruntime/insightface/opencv break on 2.x
+numpy==1.26.4
+
+# QR codes + crypto helpers
+qrcode[pil]==7.4.2
+
+# Scheduled jobs
+apscheduler==3.10.4
+
+# Printable PDF ID cards
+reportlab==4.2.5

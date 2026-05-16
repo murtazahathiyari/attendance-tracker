@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Camera Test — Attendance Tracker</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <style>
+    .camera-wrap {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      align-items: start;
+    }
+    video {
+      width: 100%;
+      border-radius: 8px;
+      background: #000;
+      aspect-ratio: 4 / 3;
+    }
+    canvas { display: none; }
+    pre {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 12px;
+      margin: 0;
+      overflow: auto;
+      max-height: 320px;
+    }
+    .log-line { padding: 2px 0; }
+    .log-line.ok { color: var(--ok); }
+    .log-line.error { color: var(--danger); }
+    @media (max-width: 800px) {
+      .camera-wrap { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <h1>Attendance Tracker</h1>
+    <nav class="app-nav">
+      <a href="/students-page">Roster</a>
+      <a href="/camera-test" class="active">Camera Test</a>
+      <a href="#" data-disabled>Dashboard</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="card">
+      <h2>Camera test</h2>
+      <p style="color: var(--muted); margin: 0 0 16px 0;">
+        Step 4 sanity check: confirms the browser can access the webcam and POST a JPEG
+        frame to the server. The server echoes back the frame size and timestamp.
+      </p>
+      <div class="form-row">
+        <button id="start">Start camera</button>
+        <button id="stop" class="secondary" disabled>Stop</button>
+        <button id="snap" class="secondary" disabled>Send one frame</button>
+        <label style="margin-left: auto; color: var(--muted); font-size: 13px;">
+          <input type="checkbox" id="auto" /> Send every 2s
+        </label>
+      </div>
+      <div class="camera-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <div>
+          <strong style="font-size: 13px; color: var(--muted);">Server responses</strong>
+          <pre id="log">Click "Start camera" to begin.</pre>
+        </div>
+      </div>
+      <canvas id="canvas"></canvas>
+    </div>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const log = document.getElementById("log");
+    const startBtn = document.getElementById("start");
+    const stopBtn = document.getElementById("stop");
+    const snapBtn = document.getElementById("snap");
+    const autoBox = document.getElementById("auto");
+
+    let stream = null;
+    let autoTimer = null;
+
+    function appendLog(line, kind = "") {
+      if (log.textContent && !log.firstElementChild) log.textContent = "";
+      const el = document.createElement("div");
+      el.className = `log-line ${kind}`;
+      el.textContent = line;
+      log.prepend(el);
+      while (log.children.length > 40) log.removeChild(log.lastChild);
+    }
+
+    async function start() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: "user" },
+          audio: false,
+        });
+        video.srcObject = stream;
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        snapBtn.disabled = false;
+        appendLog("Camera started.", "ok");
+      } catch (err) {
+        appendLog(`Camera error: ${err.message}`, "error");
+        toast(`Camera error: ${err.message}`, "error");
+      }
+    }
+
+    function stop() {
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      snapBtn.disabled = true;
+      autoBox.checked = false;
+      clearInterval(autoTimer);
+      autoTimer = null;
+      appendLog("Camera stopped.");
+    }
+
+    function grabBlob() {
+      return new Promise((resolve) => {
+        if (!stream || !video.videoWidth) return resolve(null);
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext("2d").drawImage(video, 0, 0);
+        canvas.toBlob(resolve, "image/jpeg", 0.85);
+      });
+    }
+
+    async function sendOne() {
+      const blob = await grabBlob();
+      if (!blob) {
+        appendLog("No frame available yet.", "error");
+        return;
+      }
+      const fd = new FormData();
+      fd.append("frame", blob, "frame.jpg");
+      try {
+        const result = await api("/api/camera-test/echo", { method: "POST", body: fd });
+        appendLog(`${result.width}x${result.height} (${result.received_bytes} bytes) @ ${result.server_time}`, "ok");
+      } catch (err) {
+        appendLog(`POST failed: ${err.message}`, "error");
+      }
+    }
+
+    startBtn.addEventListener("click", start);
+    stopBtn.addEventListener("click", stop);
+    snapBtn.addEventListener("click", sendOne);
+    autoBox.addEventListener("change", () => {
+      clearInterval(autoTimer);
+      autoTimer = null;
+      if (autoBox.checked) {
+        autoTimer = setInterval(sendOne, 2000);
+        sendOne();
+      }
+    });
+  </script>
+</body>
+</html>
